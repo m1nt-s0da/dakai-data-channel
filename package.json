@@ -1,0 +1,21 @@
+{
+  "name": "dekai-data-channel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-friendly TypeScript implementation for Dekai data channels.",
+  "files": [
+    "ts"
+  ],
+  "exports": {
+    ".": "./ts/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:ts": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
