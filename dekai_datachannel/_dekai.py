@@ -11,6 +11,8 @@ from ._events import EventTarget
 
 logger = getLogger("dekai_datachannel")
 
+SendPhase = Literal["awaiting_request_chunk", "awaiting_final_response"]
+
 
 @dataclass
 class RequestedChunk:
@@ -24,9 +26,8 @@ class RequestedChunk:
 class SendingSession:
     payload: bytes
     response_future: asyncio.Future
-    last_activity: float
-    activity_event: asyncio.Event
-    timeout_task: asyncio.Task[None]
+    phase: SendPhase
+    timeout_task: asyncio.Task[None] | None
 
 
 class StartReceivingHandler(Protocol):
@@ -214,6 +215,7 @@ class DekaiDataChannel(EventTarget):
         channel: RTCDataChannel,
         chunk_size: int = 16384,
         timeout_seconds: float = 30.0,
+        final_response_timeout_seconds: float | None = None,
     ):
         super().__init__()
         messaging = DekaiDataChannelMessaging(channel)
@@ -221,6 +223,11 @@ class DekaiDataChannel(EventTarget):
         self.__chunk_size = chunk_size
         self.__frame_body_size = chunk_size - 8
         self.__timeout_seconds = timeout_seconds
+        self.__final_response_timeout_seconds = (
+            max(timeout_seconds * 3, timeout_seconds)
+            if final_response_timeout_seconds is None
+            else final_response_timeout_seconds
+        )
         self.__messaging = messaging
         self.__receiving: dict[UUID, tuple[TransferReceive, asyncio.Future[None]]] = {}
         self.__sending: dict[UUID, SendingSession] = {}
@@ -231,13 +238,45 @@ class DekaiDataChannel(EventTarget):
         messaging.on("chunk_content", self._on_chunk_content)
         messaging.on("timeout", self._on_timeout)
 
-    async def _ensure_default_receiver(self, receive: TransferReceive):
+    def _trace_session(
+        self,
+        event: str,
+        *,
+        session_id: UUID,
+        chunk_id: int | None = None,
+        byte_offset: int | None = None,
+        byte_length: int | None = None,
+        phase: SendPhase | None = None,
+    ):
+        logger.debug(
+            "Dekai trace event=%s session_id=%s chunk_id=%s byte_offset=%s byte_length=%s phase=%s",
+            event,
+            session_id,
+            "-" if chunk_id is None else chunk_id,
+            "-" if byte_offset is None else byte_offset,
+            "-" if byte_length is None else byte_length,
+            "-" if phase is None else phase,
+        )
+
+    def _send_timeout_seconds(self, phase: SendPhase) -> float:
+        if phase == "awaiting_request_chunk":
+            return self.__timeout_seconds
+        return self.__final_response_timeout_seconds
+
+    async def _ensure_default_receiver(
+        self, session_id: UUID, receive: TransferReceive
+    ):
         await asyncio.sleep(0)
         if not receive.has_receiver:
             try:
                 await receive.buffered().join()
             except Exception as exc:
-                logger.debug("Default receiver aborted: %s", exc)
+                logger.error(
+                    "Default buffered receiver failed: session_id=%s error=%s",
+                    session_id,
+                    exc,
+                    exc_info=exc,
+                )
 
     def _cancel_requested_chunks(self, session_id: UUID):
         for chunk_id, chunk in list(self.__chunk_ids.items()):
@@ -270,42 +309,37 @@ class DekaiDataChannel(EventTarget):
         except asyncio.CancelledError:
             raise
 
-    async def _monitor_send_timeout(self, session_id: UUID):
-        session = self.__sending[session_id]
-        loop = asyncio.get_running_loop()
-
+    async def _monitor_send_timeout(self, session_id: UUID, phase: SendPhase):
         try:
-            while not session.response_future.done():
-                remaining = self.__timeout_seconds - (
-                    loop.time() - session.last_activity
-                )
-                if remaining <= 0:
-                    break
-
-                session.activity_event.clear()
-                try:
-                    await asyncio.wait_for(session.activity_event.wait(), remaining)
-                except asyncio.TimeoutError:
-                    break
-
-            if session.response_future.done() or session_id not in self.__sending:
+            await asyncio.sleep(self._send_timeout_seconds(phase))
+            session = self.__sending.get(session_id)
+            if (
+                session is None
+                or session.response_future.done()
+                or session.phase != phase
+            ):
                 return
 
+            self._trace_session("timeout.send", session_id=session_id, phase=phase)
             self.__messaging.notify("timeout", session_id=session_id)
             if not session.response_future.done():
                 session.response_future.set_exception(
-                    TimeoutError(f"Send session timed out: {session_id}")
+                    TimeoutError(f"Send session timed out ({phase}): {session_id}")
                 )
         except asyncio.CancelledError:
             raise
 
-    def _mark_send_activity(self, session_id: UUID):
+    def _arm_send_timeout(self, session_id: UUID, phase: SendPhase):
         session = self.__sending.get(session_id)
         if session is None:
             return
 
-        session.last_activity = asyncio.get_running_loop().time()
-        session.activity_event.set()
+        if session.timeout_task is not None:
+            session.timeout_task.cancel()
+        session.phase = phase
+        session.timeout_task = asyncio.create_task(
+            self._monitor_send_timeout(session_id, phase)
+        )
 
     @overload
     def on(self, event: Literal["start_receiving"], handler: StartReceivingHandler): ...
@@ -323,6 +357,12 @@ class DekaiDataChannel(EventTarget):
     ):
         if not isinstance(session_id, UUID):
             session_id = UUID(str(session_id))
+
+        self._trace_session(
+            "start_session.recv",
+            session_id=session_id,
+            byte_length=byte_length,
+        )
 
         future: asyncio.Future[None] = asyncio.Future()
 
@@ -350,7 +390,7 @@ class DekaiDataChannel(EventTarget):
         try:
             self._emit("start_receiving", receive)
             if not receive.has_receiver:
-                asyncio.create_task(self._ensure_default_receiver(receive))
+                asyncio.create_task(self._ensure_default_receiver(session_id, receive))
             receive._finalize_if_ready()
             await future
         finally:
@@ -378,6 +418,13 @@ class DekaiDataChannel(EventTarget):
             timeout_task=timeout_task,
         )
         try:
+            self._trace_session(
+                "request_chunk.send",
+                session_id=session_id,
+                chunk_id=chunk_id,
+                byte_offset=byte_offset,
+                byte_length=byte_length,
+            )
             await self.__messaging.call(
                 "request_chunk",
                 session_id=session_id,
@@ -405,17 +452,38 @@ class DekaiDataChannel(EventTarget):
         if session is None:
             raise ValueError(f"Unknown session: {session_id}")
 
-        self._mark_send_activity(session_id)
+        self._trace_session(
+            "request_chunk.recv",
+            session_id=session_id,
+            chunk_id=chunk_id,
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+            phase=session.phase,
+        )
         data = session.payload
         if byte_offset < 0 or byte_length < 0:
             raise ValueError("Chunk offset and length must be non-negative.")
         if byte_offset + byte_length > len(data):
             raise ValueError("Requested chunk range exceeds the transfer size.")
 
+        next_phase: SendPhase = (
+            "awaiting_final_response"
+            if byte_offset + byte_length == len(data)
+            else "awaiting_request_chunk"
+        )
         await self.__messaging.send_chunk(
             chunk_id,
             data[byte_offset : byte_offset + byte_length],
         )
+        self._trace_session(
+            "chunk_content.send",
+            session_id=session_id,
+            chunk_id=chunk_id,
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+            phase=next_phase,
+        )
+        self._arm_send_timeout(session_id, next_phase)
 
     async def _on_chunk_content(
         self,
@@ -428,11 +496,30 @@ class DekaiDataChannel(EventTarget):
             return
 
         chunk.timeout_task.cancel()
-        chunk.receive._push_chunk(chunk.offset, data)
+        self._trace_session(
+            "chunk_content.recv",
+            session_id=chunk.session_id,
+            chunk_id=chunk_id,
+            byte_offset=chunk.offset,
+            byte_length=len(data),
+        )
+        try:
+            chunk.receive._push_chunk(chunk.offset, data)
+        except Exception as exc:
+            logger.error(
+                "Failed to process received chunk: session_id=%s chunk_id=%s error=%s",
+                chunk.session_id,
+                chunk_id,
+                exc,
+                exc_info=exc,
+            )
+            self._fail_receive_session(chunk.session_id, exc)
 
     async def _on_timeout(self, session_id: UUID):
         if not isinstance(session_id, UUID):
             session_id = UUID(str(session_id))
+
+        self._trace_session("timeout.recv", session_id=session_id)
 
         self._fail_receive_session(
             session_id,
@@ -442,6 +529,11 @@ class DekaiDataChannel(EventTarget):
     async def send(self, data: str | bytes, mode: Literal["text", "binary"]):
         payload = data.encode("utf-8") if isinstance(data, str) else data
         session_id = uuid7()
+        self._trace_session(
+            "start_session.send",
+            session_id=session_id,
+            byte_length=len(payload),
+        )
         response_future = self.__messaging.call(
             "start_session",
             session_id=session_id,
@@ -452,14 +544,15 @@ class DekaiDataChannel(EventTarget):
         sending_session = SendingSession(
             payload=payload,
             response_future=response_future,
-            last_activity=asyncio.get_running_loop().time(),
-            activity_event=asyncio.Event(),
-            timeout_task=asyncio.create_task(self._monitor_send_timeout(session_id)),
+            phase="awaiting_request_chunk",
+            timeout_task=None,
         )
         self.__sending[session_id] = sending_session
+        self._arm_send_timeout(session_id, "awaiting_request_chunk")
 
         try:
             await response_future
         finally:
-            sending_session.timeout_task.cancel()
+            if sending_session.timeout_task is not None:
+                sending_session.timeout_task.cancel()
             self.__sending.pop(session_id, None)

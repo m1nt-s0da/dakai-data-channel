@@ -13,6 +13,7 @@ class FakeMessageEvent<T> extends Event {
 class FakeRTCDataChannel extends EventTarget {
   peer: FakeRTCDataChannel | null = null;
   sendFilter: ((message: string | BufferSource) => boolean) | null = null;
+  sendDelay: ((message: string | BufferSource) => number) | null = null;
 
   send(message: string | BufferSource): void {
     if (this.peer === null) {
@@ -21,7 +22,14 @@ class FakeRTCDataChannel extends EventTarget {
     if (this.sendFilter !== null && !this.sendFilter(message)) {
       return;
     }
-    this.peer.dispatchEvent(new FakeMessageEvent("message", message));
+    const delay = this.sendDelay?.(message) ?? 0;
+    if (delay <= 0) {
+      this.peer.dispatchEvent(new FakeMessageEvent("message", message));
+      return;
+    }
+    setTimeout(() => {
+      this.peer?.dispatchEvent(new FakeMessageEvent("message", message));
+    }, delay);
   }
 }
 
@@ -43,6 +51,13 @@ function isFrameMessage(message: string | BufferSource): boolean {
   }
 
   return new Uint8Array(message.buffer, message.byteOffset, message.byteLength)[0] === 0x66;
+}
+
+function isStartSessionResponseMessage(message: string | BufferSource): boolean {
+  if (typeof message !== "string") {
+    return false;
+  }
+  return message.includes('"result":null') && !message.includes('"method":"start_session"');
 }
 
 beforeAll(() => {
@@ -160,6 +175,32 @@ describe("DekaiDataChannel (TypeScript)", () => {
     await expect(
       Promise.race([receivedError, timeoutPromise(TEST_TIMEOUT_MS, "receiver error timed out")]),
     ).resolves.toMatch(/Sender abandoned transfer due to timeout/);
+  });
+
+  test("waits longer for the final start_session response", async () => {
+    const [senderChannel, receiverChannel] = createChannelPair();
+    receiverChannel.sendDelay = (message) => isStartSessionResponseMessage(message) ? 100 : 0;
+
+    const sender = new DekaiDataChannel(senderChannel as unknown as RTCDataChannel, 24, 0.05, 0.2);
+    const receiver = new DekaiDataChannel(receiverChannel as unknown as RTCDataChannel, 24, 0.05, 0.2);
+
+    const payload = new Uint8Array(Array.from({ length: 32 }, (_, index) => index));
+    const received = new Promise<Uint8Array>((resolve) => {
+      receiver.on("received", (data) => {
+        resolve(data as Uint8Array);
+      });
+    });
+
+    await expect(
+      Promise.race([
+        sender.send(payload, "binary"),
+        timeoutPromise(TEST_TIMEOUT_MS, "send timed out"),
+      ]),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      Promise.race([received, timeoutPromise(TEST_TIMEOUT_MS, "receive timed out")]),
+    ).resolves.toEqual(payload);
   });
 });
 

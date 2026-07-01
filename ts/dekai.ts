@@ -26,11 +26,13 @@ type RequestedChunk = {
   timeoutId: number;
 };
 
+type SendPhase = "awaiting_request_chunk" | "awaiting_final_response";
+
 type SendingSession = {
   payload: Uint8Array;
   response: Promise<Record<string, unknown> | null>;
   reject: (reason?: unknown) => void;
-  lastActivity: number;
+  phase: SendPhase;
   timeoutId: number | null;
 };
 
@@ -251,6 +253,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     readonly channel: RTCDataChannel,
     chunkSize = 16_384,
     private readonly timeoutSeconds = 30,
+    private readonly finalResponseTimeoutSeconds = Math.max(timeoutSeconds * 3, timeoutSeconds),
   ) {
     super();
     this.frameBodySize = chunkSize - 8;
@@ -262,10 +265,52 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     this.messaging.on("timeout", (sessionId) => this.onTimeout(sessionId));
   }
 
+  private traceSession(
+    event: string,
+    details: {
+      sessionId: string;
+      chunkId?: bigint;
+      byteOffset?: number;
+      byteLength?: number;
+      phase?: SendPhase;
+    },
+  ): void {
+    console.debug("Dekai trace", {
+      event,
+      sessionId: details.sessionId,
+      chunkId: details.chunkId?.toString(),
+      byteOffset: details.byteOffset,
+      byteLength: details.byteLength,
+      phase: details.phase,
+    });
+  }
+
+  private sendTimeoutMs(phase: SendPhase): number {
+    return (phase === "awaiting_request_chunk" ? this.timeoutSeconds : this.finalResponseTimeoutSeconds) * 1000;
+  }
+
+  private armSendTimeout(sessionId: string, phase: SendPhase): void {
+    const session = this.sending.get(sessionId);
+    if (session === undefined) {
+      return;
+    }
+
+    if (session.timeoutId !== null) {
+      window.clearTimeout(session.timeoutId);
+    }
+    session.phase = phase;
+    session.timeoutId = window.setTimeout(() => {
+      this.traceSession("timeout.send", { sessionId, phase });
+      this.messaging.notify("timeout", { session_id: sessionId });
+      session.reject(new Error(`Send session timed out (${phase}): ${sessionId}`));
+    }, this.sendTimeoutMs(phase));
+  }
+
   async send(data: string | Uint8Array, mode: Mode): Promise<void> {
     const payload = typeof data === "string" ? this.textEncoder.encode(data) : data.slice();
     const sessionId = uuid7();
     const digest = await sha256Hex(payload);
+    this.traceSession("start_session.send", { sessionId, byteLength: payload.byteLength });
     const rpcPromise = this.messaging.call("start_session", {
       session_id: sessionId,
       byte_length: payload.byteLength,
@@ -273,18 +318,15 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
       mode,
     });
     const gate = deferred<Record<string, unknown> | null>();
-    const timeoutId = window.setTimeout(() => {
-      this.messaging.notify("timeout", { session_id: sessionId });
-      gate.reject(new Error(`Send session timed out: ${sessionId}`));
-    }, this.timeoutSeconds * 1000);
 
     this.sending.set(sessionId, {
       payload,
       response: gate.promise,
       reject: gate.reject,
-      lastActivity: performance.now(),
-      timeoutId,
+      phase: "awaiting_request_chunk",
+      timeoutId: null,
     });
+    this.armSendTimeout(sessionId, "awaiting_request_chunk");
 
     rpcPromise.then(gate.resolve, gate.reject);
 
@@ -300,6 +342,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
   }
 
   private async onStartSession(sessionId: string, byteLength: number, hash: string, mode: Mode): Promise<void> {
+    this.traceSession("start_session.recv", { sessionId, byteLength });
     const gate = deferred<void>();
     let receive!: TransferReceive;
     receive = new TransferReceive(
@@ -317,7 +360,9 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     this.emit("start_receiving", receive);
     queueMicrotask(() => {
       if (!receive.hasReceiver) {
-        void receive.buffered().join().catch(() => undefined);
+        void receive.buffered().join().catch((error) => {
+          console.error("Default buffered receiver failed", { sessionId, error });
+        });
       }
     });
 
@@ -342,6 +387,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
 
     this.chunkIds.set(chunkId, { sessionId, receive, offset: byteOffset, timeoutId });
     try {
+      this.traceSession("request_chunk.send", { sessionId, chunkId, byteOffset, byteLength });
       await this.messaging.call("request_chunk", {
         session_id: sessionId,
         chunk_id: chunkId,
@@ -363,7 +409,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     if (session === undefined) {
       throw new Error(`Unknown session: ${sessionId}`);
     }
-    session.lastActivity = performance.now();
+    this.traceSession("request_chunk.recv", { sessionId, chunkId, byteOffset, byteLength, phase: session.phase });
 
     if (byteOffset < 0 || byteLength < 0) {
       throw new Error("Chunk offset and length must be non-negative.");
@@ -372,15 +418,12 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
       throw new Error("Requested chunk range exceeds the transfer size.");
     }
 
-    if (session.timeoutId !== null) {
-      window.clearTimeout(session.timeoutId);
-    }
-    session.timeoutId = window.setTimeout(() => {
-      this.messaging.notify("timeout", { session_id: sessionId });
-      session.reject(new Error(`Send session timed out: ${sessionId}`));
-    }, this.timeoutSeconds * 1000);
-
+    const nextPhase: SendPhase = byteOffset + byteLength === session.payload.byteLength
+      ? "awaiting_final_response"
+      : "awaiting_request_chunk";
     this.messaging.sendChunk(chunkId, session.payload.slice(byteOffset, byteOffset + byteLength));
+    this.traceSession("chunk_content.send", { sessionId, chunkId, byteOffset, byteLength, phase: nextPhase });
+    this.armSendTimeout(sessionId, nextPhase);
   }
 
   private onChunkContent(chunkId: bigint, data: Uint8Array): void {
@@ -391,10 +434,26 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
 
     window.clearTimeout(requestedChunk.timeoutId);
     this.chunkIds.delete(chunkId);
-    requestedChunk.receive.pushChunk(requestedChunk.offset, data);
+    this.traceSession("chunk_content.recv", {
+      sessionId: requestedChunk.sessionId,
+      chunkId,
+      byteOffset: requestedChunk.offset,
+      byteLength: data.byteLength,
+    });
+    try {
+      requestedChunk.receive.pushChunk(requestedChunk.offset, data);
+    } catch (error) {
+      console.error("Failed to process received chunk", {
+        sessionId: requestedChunk.sessionId,
+        chunkId: chunkId.toString(),
+        error,
+      });
+      this.failReceiveSession(requestedChunk.sessionId, normalizeError(error));
+    }
   }
 
   private onTimeout(sessionId: string): void {
+    this.traceSession("timeout.recv", { sessionId });
     this.failReceiveSession(sessionId, new Error(`Sender abandoned transfer due to timeout: ${sessionId}`));
   }
 
@@ -417,6 +476,10 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
       this.chunkIds.delete(chunkId);
     }
   }
+}
+
+function normalizeError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export type { Mode };

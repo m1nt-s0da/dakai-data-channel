@@ -14,6 +14,7 @@ class FakeRTCDataChannel:
         self._handlers: dict[str, list] = {}
         self._peer: FakeRTCDataChannel | None = None
         self._send_filter: Callable[[str | bytes], bool] | None = None
+        self._send_delay: Callable[[str | bytes], float] | None = None
 
     def on(self, event: str, handler):
         self._handlers.setdefault(event, []).append(handler)
@@ -23,7 +24,11 @@ class FakeRTCDataChannel:
             raise RuntimeError("Peer channel is not connected.")
         if self._send_filter is not None and not self._send_filter(message):
             return
-        self._peer._deliver(message)
+        delay = 0.0 if self._send_delay is None else self._send_delay(message)
+        if delay <= 0:
+            self._peer._deliver(message)
+            return
+        asyncio.get_running_loop().call_later(delay, self._peer._deliver, message)
 
     def _deliver(self, message: str | bytes):
         for handler in self._handlers.get("message", []):
@@ -44,6 +49,14 @@ def frame_message(message: str | bytes) -> bool:
 
 def request_chunk_message(message: str | bytes) -> bool:
     return isinstance(message, bytes) and b'"method":"request_chunk"' in message
+
+
+def start_session_response_message(message: str | bytes) -> bool:
+    return (
+        isinstance(message, bytes)
+        and b'"result":null' in message
+        and b'"method":"start_session"' not in message
+    )
 
 
 def test_send_text_buffered():
@@ -253,6 +266,39 @@ def test_send_timeout_notifies_receiver():
 
         assert "Sender abandoned transfer due to timeout" in await asyncio.wait_for(
             received_error, TEST_TIMEOUT_SECONDS
+        )
+
+    asyncio.run(asyncio.wait_for(scenario(), TEST_TIMEOUT_SECONDS))
+
+
+def test_send_waits_longer_for_final_start_session_response():
+    async def scenario():
+        sender_channel, receiver_channel = create_channel_pair()
+        receiver_channel._send_delay = lambda message: (
+            0.1 if start_session_response_message(message) else 0.0
+        )
+
+        sender = DekaiDataChannel(
+            cast(RTCDataChannel, sender_channel),
+            chunk_size=24,
+            timeout_seconds=0.05,
+            final_response_timeout_seconds=0.2,
+        )
+        receiver = DekaiDataChannel(
+            cast(RTCDataChannel, receiver_channel),
+            chunk_size=24,
+            timeout_seconds=0.05,
+            final_response_timeout_seconds=0.2,
+        )
+
+        received = asyncio.Future()
+        receiver.on("received", lambda data: received.set_result(data))
+
+        await asyncio.wait_for(
+            sender.send(bytes(range(32)), "binary"), TEST_TIMEOUT_SECONDS
+        )
+        assert await asyncio.wait_for(received, TEST_TIMEOUT_SECONDS) == bytes(
+            range(32)
         )
 
     asyncio.run(asyncio.wait_for(scenario(), TEST_TIMEOUT_SECONDS))
