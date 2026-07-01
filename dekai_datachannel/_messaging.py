@@ -9,6 +9,8 @@ import asyncio
 
 logger = getLogger("dekai_datachannel")
 
+CHUNK_ID_MASK = 0x000FFFFFFFFFFFFF
+
 
 @dataclass
 class JSONRPCRequest:
@@ -294,8 +296,8 @@ class DekaiDataChannelMessaging:
         chunk_id: int,
         data: bytes,
     ):
-        if chunk_id < 0 or chunk_id > 0x00FFFFFFFFFFFFFF:
-            raise ValueError("chunk_id must fit within 56 bits.")
+        if chunk_id < 0 or chunk_id > CHUNK_ID_MASK:
+            raise ValueError("chunk_id must fit within 52 bits.")
 
         frame_id = (chunk_id << 8) | 0x66
         chunk_id_bytes = frame_id.to_bytes(8, "little")

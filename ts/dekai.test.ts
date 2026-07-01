@@ -60,6 +60,13 @@ function isStartSessionResponseMessage(message: string | BufferSource): boolean 
   return message.includes('"result":null') && !message.includes('"method":"start_session"');
 }
 
+function parseJsonMessage(message: string | BufferSource): Record<string, unknown> | null {
+  if (typeof message !== "string") {
+    return null;
+  }
+  return JSON.parse(message) as Record<string, unknown>;
+}
+
 beforeAll(() => {
   Object.assign(globalThis, { window: globalThis });
 });
@@ -201,6 +208,37 @@ describe("DekaiDataChannel (TypeScript)", () => {
     await expect(
       Promise.race([received, timeoutPromise(TEST_TIMEOUT_MS, "receive timed out")]),
     ).resolves.toEqual(payload);
+  });
+
+  test("sends request_chunk chunk_id as a JSON number", async () => {
+    const [senderChannel, receiverChannel] = createChannelPair();
+    let serializedChunkIdType: string | null = null;
+
+    receiverChannel.sendFilter = (message) => {
+      const json = parseJsonMessage(message);
+      if (json?.method !== "request_chunk") {
+        return true;
+      }
+      const params = json.params as Record<string, unknown>;
+      serializedChunkIdType = typeof params.chunk_id;
+      return true;
+    };
+
+    const sender = new DekaiDataChannel(senderChannel as unknown as RTCDataChannel, 32, 0.2);
+    const receiver = new DekaiDataChannel(receiverChannel as unknown as RTCDataChannel, 32, 0.2);
+
+    receiver.on("start_receiving", (receiving) => {
+      void receiving.buffered().join().catch(() => undefined);
+    });
+
+    await expect(
+      Promise.race([
+        sender.send("hello buffered world", "text"),
+        timeoutPromise(TEST_TIMEOUT_MS, "send timed out"),
+      ]),
+    ).resolves.toBeUndefined();
+
+    expect(serializedChunkIdType).toBe("number");
   });
 });
 

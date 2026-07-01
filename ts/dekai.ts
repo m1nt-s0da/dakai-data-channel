@@ -2,6 +2,8 @@ import { EventEmitter } from "./events";
 import { DekaiDataChannelMessaging, type Mode } from "./messaging";
 import { createChunkId, deferred, sha256Hex, uuid7 } from "./utils";
 
+const CHUNK_ID_MASK = 0x000f_ffff_ffff_ffffn;
+
 type StartReceivingHandler = [receiving: TransferReceive];
 type ReceivedHandler = [data: string | Uint8Array];
 type ProgressHandler = [receivedBytes: number, totalBytes: number];
@@ -394,7 +396,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
   private async requestChunk(sessionId: string, receive: TransferReceive, byteOffset: number, byteLength: number): Promise<void> {
     let chunkId = createChunkId();
     while (this.chunkIds.has(chunkId)) {
-      chunkId = (chunkId + 1n) & 0x00ff_ffff_ffff_ffffn;
+      chunkId = (chunkId + 1n) & CHUNK_ID_MASK;
     }
 
     const timeoutId = window.setTimeout(() => {

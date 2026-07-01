@@ -1,6 +1,6 @@
 {
   "name": "dekai-data-channel",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "Browser-friendly TypeScript implementation for Dekai data channels.",

@@ -1,5 +1,5 @@
 import { EventEmitter } from "./events";
-import { concatBytes, createChunkId, frameChunkId, normalizeMessageData, parseChunkId, uuid7 } from "./utils";
+import { chunkIdToNumber, concatBytes, createChunkId, frameChunkId, normalizeMessageData, parseChunkId, uuid7 } from "./utils";
 
 type Mode = "text" | "binary";
 
@@ -213,7 +213,7 @@ export class DekaiDataChannelMessaging extends EventEmitter<MessageHandlers> {
   private serializeParams(params: Record<string, unknown>): Record<string, unknown> {
     const serialized: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(params)) {
-      serialized[key] = typeof value === "bigint" ? value.toString() : value;
+      serialized[key] = typeof value === "bigint" ? chunkIdToNumber(value) : value;
     }
     return serialized;
   }

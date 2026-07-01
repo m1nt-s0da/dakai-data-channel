@@ -12,6 +12,7 @@ from ._events import EventTarget
 logger = getLogger("dekai_datachannel")
 
 SendPhase = Literal["awaiting_request_chunk", "awaiting_final_response"]
+CHUNK_ID_MASK = 0x000FFFFFFFFFFFFF
 
 
 @dataclass
@@ -425,9 +426,9 @@ class DekaiDataChannel(EventTarget):
         byte_offset: int,
         byte_length: int,
     ):
-        chunk_id = uuid7().int & 0x00FFFFFFFFFFFFFF
+        chunk_id = uuid7().int & CHUNK_ID_MASK
         while chunk_id in self.__chunk_ids:
-            chunk_id = (chunk_id + 1) & 0x00FFFFFFFFFFFFFF
+            chunk_id = (chunk_id + 1) & CHUNK_ID_MASK
 
         timeout_task = asyncio.create_task(
             self._monitor_chunk_timeout(session_id, chunk_id)

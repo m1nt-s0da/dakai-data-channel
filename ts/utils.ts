@@ -1,4 +1,4 @@
-const CHUNK_ID_MASK = 0x00ff_ffff_ffff_ffffn;
+const CHUNK_ID_MASK = 0x000f_ffff_ffff_ffffn;
 
 const HEX: string[] = [];
 for (let index = 0; index < 256; index += 1) {
@@ -52,7 +52,7 @@ export function createChunkId(): bigint {
 
 export function frameChunkId(chunkId: bigint): Uint8Array {
   if (chunkId < 0n || chunkId > CHUNK_ID_MASK) {
-    throw new RangeError("chunkId must fit within 56 bits.");
+    throw new RangeError("chunkId must fit within 52 bits.");
   }
 
   const frameId = (chunkId << 8n) | 0x66n;
@@ -71,6 +71,13 @@ export function parseChunkId(frame: Uint8Array): bigint {
     value = (value << 8n) | BigInt(frame[index]);
   }
   return value >> 8n;
+}
+
+export function chunkIdToNumber(chunkId: bigint): number {
+  if (chunkId < 0n || chunkId > CHUNK_ID_MASK) {
+    throw new RangeError("chunkId must fit within 52 bits.");
+  }
+  return Number(chunkId);
 }
 
 export function concatBytes(parts: Uint8Array[]): Uint8Array {
