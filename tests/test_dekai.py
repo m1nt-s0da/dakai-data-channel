@@ -1,10 +1,12 @@
 import asyncio
+from types import MethodType
 from typing import Callable, cast
 
 from aiortc import RTCDataChannel
 import pytest
 
-from dekai_datachannel._dekai import DekaiDataChannel
+from dekai_datachannel._dekai import DekaiDataChannel, SendingSession
+from uuid import uuid7
 
 TEST_TIMEOUT_SECONDS = 1.0
 
@@ -300,5 +302,40 @@ def test_send_waits_longer_for_final_start_session_response():
         assert await asyncio.wait_for(received, TEST_TIMEOUT_SECONDS) == bytes(
             range(32)
         )
+
+    asyncio.run(asyncio.wait_for(scenario(), TEST_TIMEOUT_SECONDS))
+
+
+def test_request_chunk_notify_normalizes_string_params():
+    async def scenario():
+        sender_channel, _ = create_channel_pair()
+        sender = DekaiDataChannel(cast(RTCDataChannel, sender_channel), chunk_size=24)
+
+        session_id = uuid7()
+        response_future = asyncio.Future()
+        sender._DekaiDataChannel__sending[session_id] = SendingSession(
+            payload=bytes(range(4)),
+            response_future=response_future,
+            phase="awaiting_request_chunk",
+            timeout_task=None,
+        )
+
+        sent: dict[str, int | bytes] = {}
+
+        async def fake_send_chunk(self, chunk_id: int, data: bytes):
+            sent["chunk_id"] = chunk_id
+            sent["data"] = data
+
+        sender._DekaiDataChannel__messaging.send_chunk = MethodType(
+            fake_send_chunk, sender._DekaiDataChannel__messaging
+        )
+
+        await sender._on_request_chunk(str(session_id), "7", "0", "4")
+
+        session = sender._DekaiDataChannel__sending[session_id]
+        if session.timeout_task is not None:
+            session.timeout_task.cancel()
+
+        assert sent == {"chunk_id": 7, "data": bytes(range(4))}
 
     asyncio.run(asyncio.wait_for(scenario(), TEST_TIMEOUT_SECONDS))

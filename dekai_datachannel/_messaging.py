@@ -149,7 +149,16 @@ class DekaiDataChannelMessaging:
 
     async def _process_json_request(self, request: JSONRPCRequest):
         if request.id is None:
-            await self._emit(request.method, **request.params)
+            try:
+                await self._emit(request.method, **request.params)
+            except Exception as e:
+                logger.error(
+                    "JSON-RPC notification handler failed: method=%s params=%s error=%s",
+                    request.method,
+                    request.params,
+                    e,
+                    exc_info=e,
+                )
         else:
             try:
                 result = await self._emit(request.method, **request.params)

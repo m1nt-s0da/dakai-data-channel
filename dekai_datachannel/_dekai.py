@@ -462,6 +462,12 @@ class DekaiDataChannel(EventTarget):
     ) -> None:
         if not isinstance(session_id, UUID):
             session_id = UUID(str(session_id))
+        if not isinstance(chunk_id, int):
+            chunk_id = int(chunk_id)
+        if not isinstance(byte_offset, int):
+            byte_offset = int(byte_offset)
+        if not isinstance(byte_length, int):
+            byte_length = int(byte_length)
 
         session = self.__sending.get(session_id)
         if session is None:
