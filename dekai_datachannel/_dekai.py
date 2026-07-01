@@ -258,6 +258,27 @@ class DekaiDataChannel(EventTarget):
             "-" if phase is None else phase,
         )
 
+    def _drop_requested_chunk(
+        self, chunk_id: int, reason: str
+    ) -> RequestedChunk | None:
+        chunk = self.__chunk_ids.pop(chunk_id, None)
+        if chunk is None:
+            logger.debug(
+                "Dekai trace event=chunk_id.missing chunk_id=%s reason=%s",
+                chunk_id,
+                reason,
+            )
+            return None
+
+        self._trace_session(
+            "chunk_id.drop",
+            session_id=chunk.session_id,
+            chunk_id=chunk_id,
+            byte_offset=chunk.offset,
+        )
+        logger.debug("Dekai trace chunk_id=%s reason=%s", chunk_id, reason)
+        return chunk
+
     def _send_timeout_seconds(self, phase: SendPhase) -> float:
         if phase == "awaiting_request_chunk":
             return self.__timeout_seconds
@@ -283,7 +304,7 @@ class DekaiDataChannel(EventTarget):
             if chunk.session_id != session_id:
                 continue
             chunk.timeout_task.cancel()
-            self.__chunk_ids.pop(chunk_id, None)
+            self._drop_requested_chunk(chunk_id, "receive_session_cancelled")
 
     def _fail_receive_session(self, session_id: UUID, error: Exception):
         session = self.__receiving.get(session_id)
@@ -299,7 +320,7 @@ class DekaiDataChannel(EventTarget):
     async def _monitor_chunk_timeout(self, session_id: UUID, chunk_id: int):
         try:
             await asyncio.sleep(self.__timeout_seconds)
-            chunk = self.__chunk_ids.pop(chunk_id, None)
+            chunk = self._drop_requested_chunk(chunk_id, "chunk_content_timeout")
             if chunk is None:
                 return
             self._fail_receive_session(
@@ -484,8 +505,12 @@ class DekaiDataChannel(EventTarget):
         chunk_id: int,
         data: bytes,
     ):
-        chunk = self.__chunk_ids.pop(chunk_id, None)
+        chunk = self._drop_requested_chunk(chunk_id, "chunk_content_received")
         if chunk is None:
+            logger.debug(
+                "Dekai trace event=chunk_content.missing chunk_id=%s",
+                chunk_id,
+            )
             logger.warning("Received unknown or expired chunk content: %s", chunk_id)
             return
 
@@ -523,18 +548,7 @@ class DekaiDataChannel(EventTarget):
     async def send(self, data: str | bytes, mode: Literal["text", "binary"]):
         payload = data.encode("utf-8") if isinstance(data, str) else data
         session_id = uuid7()
-        self._trace_session(
-            "start_session.send",
-            session_id=session_id,
-            byte_length=len(payload),
-        )
-        response_future = self.__messaging.call(
-            "start_session",
-            session_id=session_id,
-            byte_length=len(payload),
-            sha256=sha256(payload).hexdigest(),
-            mode=mode,
-        )
+        response_future: asyncio.Future = asyncio.Future()
         sending_session = SendingSession(
             payload=payload,
             response_future=response_future,
@@ -542,6 +556,21 @@ class DekaiDataChannel(EventTarget):
             timeout_task=None,
         )
         self.__sending[session_id] = sending_session
+        self._trace_session(
+            "start_session.send",
+            session_id=session_id,
+            byte_length=len(payload),
+        )
+        rpc_future = self.__messaging.call(
+            "start_session",
+            session_id=session_id,
+            byte_length=len(payload),
+            sha256=sha256(payload).hexdigest(),
+            mode=mode,
+        )
+        rpc_future.add_done_callback(
+            lambda future: self._settle_send_response_future(response_future, future)
+        )
         self._arm_send_timeout(session_id, "awaiting_request_chunk")
 
         try:
@@ -550,3 +579,21 @@ class DekaiDataChannel(EventTarget):
             if sending_session.timeout_task is not None:
                 sending_session.timeout_task.cancel()
             self.__sending.pop(session_id, None)
+
+    def _settle_send_response_future(
+        self,
+        response_future: asyncio.Future,
+        rpc_future: asyncio.Future,
+    ):
+        if rpc_future.cancelled():
+            if not response_future.done():
+                response_future.cancel()
+            return
+
+        exception = rpc_future.exception()
+        if response_future.done():
+            return
+        if exception is not None:
+            response_future.set_exception(exception)
+            return
+        response_future.set_result(rpc_future.result())

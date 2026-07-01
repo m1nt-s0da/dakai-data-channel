@@ -285,6 +285,23 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     });
   }
 
+  private dropRequestedChunk(chunkId: bigint, reason: string): RequestedChunk | undefined {
+    const chunk = this.chunkIds.get(chunkId);
+    if (chunk === undefined) {
+      console.debug("Dekai trace", { event: "chunk_id.missing", chunkId: chunkId.toString(), reason });
+      return undefined;
+    }
+
+    this.chunkIds.delete(chunkId);
+    this.traceSession("chunk_id.drop", {
+      sessionId: chunk.sessionId,
+      chunkId,
+      byteOffset: chunk.offset,
+    });
+    console.debug("Dekai trace", { chunkId: chunkId.toString(), reason });
+    return chunk;
+  }
+
   private sendTimeoutMs(phase: SendPhase): number {
     return (phase === "awaiting_request_chunk" ? this.timeoutSeconds : this.finalResponseTimeoutSeconds) * 1000;
   }
@@ -310,13 +327,6 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     const payload = typeof data === "string" ? this.textEncoder.encode(data) : data.slice();
     const sessionId = uuid7();
     const digest = await sha256Hex(payload);
-    this.traceSession("start_session.send", { sessionId, byteLength: payload.byteLength });
-    const rpcPromise = this.messaging.call("start_session", {
-      session_id: sessionId,
-      byte_length: payload.byteLength,
-      sha256: digest,
-      mode,
-    });
     const gate = deferred<Record<string, unknown> | null>();
 
     this.sending.set(sessionId, {
@@ -325,6 +335,13 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
       reject: gate.reject,
       phase: "awaiting_request_chunk",
       timeoutId: null,
+    });
+    this.traceSession("start_session.send", { sessionId, byteLength: payload.byteLength });
+    const rpcPromise = this.messaging.call("start_session", {
+      session_id: sessionId,
+      byte_length: payload.byteLength,
+      sha256: digest,
+      mode,
     });
     this.armSendTimeout(sessionId, "awaiting_request_chunk");
 
@@ -381,7 +398,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     }
 
     const timeoutId = window.setTimeout(() => {
-      this.chunkIds.delete(chunkId);
+      this.dropRequestedChunk(chunkId, "chunk_content_timeout");
       this.failReceiveSession(sessionId, new Error(`Timed out waiting for chunk content: ${chunkId.toString()}`));
     }, this.timeoutSeconds * 1000);
 
@@ -418,13 +435,13 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
   }
 
   private onChunkContent(chunkId: bigint, data: Uint8Array): void {
-    const requestedChunk = this.chunkIds.get(chunkId);
+    const requestedChunk = this.dropRequestedChunk(chunkId, "chunk_content_received");
     if (requestedChunk === undefined) {
+      console.debug("Dekai trace", { event: "chunk_content.missing", chunkId: chunkId.toString() });
       return;
     }
 
     window.clearTimeout(requestedChunk.timeoutId);
-    this.chunkIds.delete(chunkId);
     this.traceSession("chunk_content.recv", {
       sessionId: requestedChunk.sessionId,
       chunkId,
@@ -464,7 +481,7 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
         continue;
       }
       window.clearTimeout(requestedChunk.timeoutId);
-      this.chunkIds.delete(chunkId);
+      this.dropRequestedChunk(chunkId, "receive_session_cancelled");
     }
   }
 }
