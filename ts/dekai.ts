@@ -386,22 +386,13 @@ export class DekaiDataChannel extends EventEmitter<DataChannelEvents> {
     }, this.timeoutSeconds * 1000);
 
     this.chunkIds.set(chunkId, { sessionId, receive, offset: byteOffset, timeoutId });
-    try {
-      this.traceSession("request_chunk.send", { sessionId, chunkId, byteOffset, byteLength });
-      await this.messaging.call("request_chunk", {
-        session_id: sessionId,
-        chunk_id: chunkId,
-        byte_offset: byteOffset,
-        byte_length: byteLength,
-      });
-    } catch (error) {
-      const requestedChunk = this.chunkIds.get(chunkId);
-      if (requestedChunk !== undefined) {
-        window.clearTimeout(requestedChunk.timeoutId);
-        this.chunkIds.delete(chunkId);
-      }
-      throw error;
-    }
+    this.traceSession("request_chunk.send", { sessionId, chunkId, byteOffset, byteLength });
+    this.messaging.notify("request_chunk", {
+      session_id: sessionId,
+      chunk_id: chunkId,
+      byte_offset: byteOffset,
+      byte_length: byteLength,
+    });
   }
 
   private async onRequestChunk(sessionId: string, chunkId: bigint, byteOffset: number, byteLength: number): Promise<void> {

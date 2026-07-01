@@ -417,26 +417,20 @@ class DekaiDataChannel(EventTarget):
             offset=byte_offset,
             timeout_task=timeout_task,
         )
-        try:
-            self._trace_session(
-                "request_chunk.send",
-                session_id=session_id,
-                chunk_id=chunk_id,
-                byte_offset=byte_offset,
-                byte_length=byte_length,
-            )
-            await self.__messaging.call(
-                "request_chunk",
-                session_id=session_id,
-                chunk_id=chunk_id,
-                byte_offset=byte_offset,
-                byte_length=byte_length,
-            )
-        except Exception:
-            chunk = self.__chunk_ids.pop(chunk_id, None)
-            if chunk is not None:
-                chunk.timeout_task.cancel()
-            raise
+        self._trace_session(
+            "request_chunk.send",
+            session_id=session_id,
+            chunk_id=chunk_id,
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+        )
+        self.__messaging.notify(
+            "request_chunk",
+            session_id=session_id,
+            chunk_id=chunk_id,
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+        )
 
     async def _on_request_chunk(
         self,

@@ -78,6 +78,7 @@ export class DekaiDataChannelMessaging extends EventEmitter<MessageHandlers> {
   }
 
   notify(method: "timeout", params: { session_id: string }): void;
+  notify(method: "request_chunk", params: { session_id: string; chunk_id: bigint; byte_offset: number; byte_length: number }): void;
   notify(method: string, params: Record<string, unknown>): void {
     const payload = this.encodeJson({
       id: null,
