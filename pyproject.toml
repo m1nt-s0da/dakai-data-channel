@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "dekai-data-channel"
 version = "0.1.0"
@@ -13,3 +17,6 @@ dependencies = [
 dev = [
     "pytest>=9.1.0",
 ]
+
+[tool.setuptools]
+packages = ["dekai_datachannel"]
