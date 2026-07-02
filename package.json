@@ -1,9 +1,16 @@
 {
-  "name": "dekai-data-channel",
+  "name": "@m1nt-s0da/dekai-data-channel",
   "version": "0.1.5",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "Browser-friendly TypeScript implementation for Dekai data channels.",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:m1nt-s0da/dakai-data-channel.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "files": [
     "ts-dist"
   ],
@@ -16,7 +23,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && node scripts/compact-ts-dist.mjs",
+    "build": "node scripts/clean-ts-dist.mjs && tsc -p tsconfig.build.json && node scripts/compact-ts-dist.mjs",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test:ts": "vitest run"
   },

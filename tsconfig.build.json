@@ -7,5 +7,6 @@
     "outDir": "ts-dist",
     "rootDir": "ts"
   },
-  "include": ["ts/**/*.ts"]
+  "include": ["ts/**/*.ts"],
+  "exclude": ["ts/**/*.test.ts"]
 }
