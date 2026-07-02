@@ -5,16 +5,23 @@
   "type": "module",
   "description": "Browser-friendly TypeScript implementation for Dekai data channels.",
   "files": [
-    "ts"
+    "ts-dist"
   ],
+  "main": "./ts-dist/index.js",
+  "types": "./ts-dist/index.d.ts",
   "exports": {
-    ".": "./ts/index.ts"
+    ".": {
+      "types": "./ts-dist/index.d.ts",
+      "import": "./ts-dist/index.js"
+    }
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/compact-ts-dist.mjs",
     "typecheck": "tsc --noEmit",
     "test:ts": "vitest run"
   },
   "devDependencies": {
+    "esbuild": "^0.25.9",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   }
